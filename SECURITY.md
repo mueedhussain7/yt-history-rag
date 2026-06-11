@@ -4,7 +4,7 @@
 
 If you discover a security vulnerability, please do **not** open a public GitHub issue.
 
-Instead, report it privately by emailing: **[SECURITY_EMAIL]**
+Instead, report it privately by emailing: **mueedhussain7@gmail.com**
 
 Please include:
 - A description of the vulnerability
