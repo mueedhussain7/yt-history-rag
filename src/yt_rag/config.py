@@ -15,7 +15,8 @@ def get_config_path() -> Path:
 def create_config_template() -> Dict[str, Any]:
     return {
         "youtube": {
-            "data_api_key": None,
+            "client_id": None,
+            "client_secret": None,
         },
         "sync": {
             "schedule": "manual",

@@ -28,7 +28,8 @@ def test_create_config_template():
     assert "transcript" in config
     assert "storage" in config
 
-    assert config["youtube"]["data_api_key"] is None
+    assert config["youtube"]["client_id"] is None
+    assert config["youtube"]["client_secret"] is None
     assert config["sync"]["schedule"] == "manual"
 
 
