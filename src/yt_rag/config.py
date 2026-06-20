@@ -1,7 +1,9 @@
 import os
 import yaml
+import json
 from pathlib import Path
 from typing import Any, Dict, Optional
+from datetime import datetime
 
 
 def get_config_dir() -> Path:
@@ -54,3 +56,75 @@ def save_config(config: Dict[str, Any]) -> None:
 
     with open(config_path, "w") as f:
         yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+
+
+def get_sync_state_path() -> Path:
+    """Get path to sync state file."""
+    return get_config_dir() / "sync_state.json"
+
+
+def create_sync_state_template() -> Dict[str, Any]:
+    """
+    Create a template for sync state.
+    """
+    return {
+        "last_sync_time": None,
+        "indexed_video_ids": [],
+        "sync_stats": {
+            "total_indexed": 0,
+            "total_failed": 0,
+        },
+    }
+
+
+def load_sync_state() -> Dict[str, Any]:
+    """
+    Load sync state from file.
+    """
+    sync_state_path = get_sync_state_path()
+
+    if not sync_state_path.exists():
+        return create_sync_state_template()
+
+    try:
+        with open(sync_state_path, "r") as f:
+            return json.load(f)
+    except Exception:
+        return create_sync_state_template()
+
+
+def save_sync_state(sync_state: Dict[str, Any]) -> None:
+    """
+    Save sync state to file.
+    """
+    sync_state_path = get_sync_state_path()
+    sync_state_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(sync_state_path, "w") as f:
+        json.dump(sync_state, f, indent=2)
+
+
+def update_sync_state(video_ids: list, failed_count: int = 0) -> None:
+    """
+    Update sync state after fetching videos.
+
+    Args:
+        video_ids: List of video IDs we just fetched
+        failed_count: How many videos failed to process
+    """
+    sync_state = load_sync_state()
+
+    # Add new video IDs (avoid duplicates)
+    existing_ids = set(sync_state.get("indexed_video_ids", []))
+    new_ids = existing_ids.union(set(video_ids))
+
+    sync_state.update({
+        "last_sync_time": datetime.now().isoformat(),
+        "indexed_video_ids": list(new_ids),
+        "sync_stats": {
+            "total_indexed": len(new_ids),
+            "total_failed": sync_state.get("sync_stats", {}).get("total_failed", 0) + failed_count,
+        },
+    })
+
+    save_sync_state(sync_state)
