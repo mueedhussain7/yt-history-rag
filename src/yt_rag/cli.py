@@ -11,6 +11,7 @@ from .config import (
 )
 from .oauth import authenticate_youtube, is_authenticated
 from .youtube_api import YouTubeAPI
+from .transcript import TranscriptExtractor
 
 # Load environment variables from .env file
 load_dotenv()
@@ -119,20 +120,41 @@ def sync() -> None:
         typer.echo("Nothing new to sync!")
         return
 
-    # Step 5: Update sync state
+    #Extract transcripts from new videos
+    typer.echo("Extracting transcripts...")
+    extractor = TranscriptExtractor()
+    transcripts_extracted = 0
+    transcripts_failed = 0
+
+    for i, video in enumerate(new_videos, 1):
+        video_id = video["video_id"]
+        typer.echo(f"  [{i}/{len(new_videos)}] {video['title'][:50]}...", nl=False)
+
+        transcript, error = extractor.extract_transcript(video_id)
+        if transcript:
+            transcripts_extracted += 1
+            typer.echo(" ✓")
+        else:
+            transcripts_failed += 1
+            typer.echo(f" ✗ ({error})")
+
+    typer.echo(f"\nTranscripts extracted: {transcripts_extracted}/{len(new_videos)}\n")
+
+    #Update sync state
     typer.echo("Updating sync state...")
     new_video_ids = [v["video_id"] for v in new_videos]
     try:
-        update_sync_state(new_video_ids)
+        update_sync_state(new_video_ids, failed_count=transcripts_failed)
         typer.echo(f"Saved {len(new_video_ids)} new videos\n")
     except Exception as e:
         typer.echo(f"Error saving sync state: {str(e)}")
         return
 
-    # Step 6: Show summary
+    #Show summary
     typer.echo("Sync complete!")
     typer.echo(f"Total videos indexed: {len(already_indexed) + len(new_videos)}")
-    typer.echo(f"New videos this sync: {len(new_videos)}")
+    typer.echo(f"Transcripts extracted: {transcripts_extracted}")
+    typer.echo(f"Transcripts failed: {transcripts_failed}")
     typer.echo("\n Next step: Run 'yt-rag search <query>' to find videos")
 
 

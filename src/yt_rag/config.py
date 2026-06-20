@@ -128,3 +128,68 @@ def update_sync_state(video_ids: list, failed_count: int = 0) -> None:
     })
 
     save_sync_state(sync_state)
+
+
+def get_transcripts_dir() -> Path:
+    """Get directory where transcripts are stored."""
+    return get_config_dir() / "transcripts"
+
+
+def get_transcript_path(video_id: str) -> Path:
+    """Get path to a specific transcript file."""
+    return get_transcripts_dir() / f"{video_id}.txt"
+
+
+def transcript_exists(video_id: str) -> bool:
+    """Check if transcript already exists."""
+    return get_transcript_path(video_id).exists()
+
+
+def save_transcript(video_id: str, transcript_text: str) -> None:
+    """
+    Save transcript to file.
+
+    Args:
+        video_id: YouTube video ID
+        transcript_text: The transcript text to save
+    """
+    transcripts_dir = get_transcripts_dir()
+    transcripts_dir.mkdir(parents=True, exist_ok=True)
+
+    transcript_path = get_transcript_path(video_id)
+    transcript_path.write_text(transcript_text)
+
+
+def load_transcript(video_id: str) -> Optional[str]:
+    """
+    Load transcript from file if it exists.
+
+    Args:
+        video_id: YouTube video ID
+
+    Returns:
+        Transcript text or None if not found
+    """
+    transcript_path = get_transcript_path(video_id)
+    if transcript_path.exists():
+        return transcript_path.read_text()
+    return None
+
+
+def get_all_transcripts() -> Dict[str, str]:
+    """
+    Get all saved transcripts.
+
+    Returns:
+        Dict mapping video_id to transcript text
+    """
+    transcripts_dir = get_transcripts_dir()
+    if not transcripts_dir.exists():
+        return {}
+
+    transcripts = {}
+    for transcript_file in transcripts_dir.glob("*.txt"):
+        video_id = transcript_file.stem  # filename without .txt
+        transcripts[video_id] = transcript_file.read_text()
+
+    return transcripts
