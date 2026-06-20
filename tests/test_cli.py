@@ -134,3 +134,61 @@ def test_sync_command_no_new_videos(cli_runner, temp_config_dir):
 
     assert result.exit_code == 0
     assert "Nothing new to sync!" in result.stdout
+
+
+def test_sync_command_with_transcript_extraction(cli_runner, temp_config_dir):
+    """Test sync command extracts transcripts from new videos."""
+    with patch("yt_rag.config.get_config_dir", return_value=temp_config_dir):
+        with patch("yt_rag.cli.YouTubeAPI") as mock_api_class:
+            with patch("yt_rag.cli.TranscriptExtractor") as mock_extractor_class:
+                # Mock YouTube API
+                mock_api = MagicMock()
+                mock_api_class.return_value = mock_api
+                mock_api.fetch_watch_history.return_value = [
+                    {"video_id": "vid1", "title": "Video 1", "url": "http://...", "watch_date": "2026-06-21"},
+                    {"video_id": "vid2", "title": "Video 2", "url": "http://...", "watch_date": "2026-06-20"},
+                ]
+
+                # Mock TranscriptExtractor
+                mock_extractor = MagicMock()
+                mock_extractor_class.return_value = mock_extractor
+                # First video succeeds, second fails
+                mock_extractor.extract_transcript.side_effect = [
+                    ("Transcript 1", None),  # Success
+                    (None, "No transcript found"),  # Failed
+                ]
+
+                result = cli_runner.invoke(app, ["sync"])
+
+    assert result.exit_code == 0
+    assert "Extracting transcripts..." in result.stdout
+    assert "Transcripts extracted: 1/2" in result.stdout
+    assert "Transcripts failed: 1" in result.stdout
+
+
+def test_sync_command_transcript_extraction_progress(cli_runner, temp_config_dir):
+    """Test that sync command shows progress for transcript extraction."""
+    with patch("yt_rag.config.get_config_dir", return_value=temp_config_dir):
+        with patch("yt_rag.cli.YouTubeAPI") as mock_api_class:
+            with patch("yt_rag.cli.TranscriptExtractor") as mock_extractor_class:
+                # Mock YouTube API with 3 new videos
+                mock_api = MagicMock()
+                mock_api_class.return_value = mock_api
+                mock_api.fetch_watch_history.return_value = [
+                    {"video_id": "vid1", "title": "Video 1", "url": "http://...", "watch_date": "2026-06-21"},
+                    {"video_id": "vid2", "title": "Video 2", "url": "http://...", "watch_date": "2026-06-20"},
+                    {"video_id": "vid3", "title": "Video 3", "url": "http://...", "watch_date": "2026-06-19"},
+                ]
+
+                # Mock all transcripts succeed
+                mock_extractor = MagicMock()
+                mock_extractor_class.return_value = mock_extractor
+                mock_extractor.extract_transcript.return_value = ("Transcript", None)
+
+                result = cli_runner.invoke(app, ["sync"])
+
+    assert result.exit_code == 0
+    assert "[1/3]" in result.stdout
+    assert "[2/3]" in result.stdout
+    assert "[3/3]" in result.stdout
+    assert "Transcripts extracted: 3/3" in result.stdout
