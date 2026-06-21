@@ -8,10 +8,12 @@ from .config import (
     save_config,
     load_sync_state,
     update_sync_state,
+    save_concepts,
 )
 from .oauth import authenticate_youtube, is_authenticated
 from .youtube_api import YouTubeAPI
 from .transcript import TranscriptExtractor
+from .concepts import ConceptExtractor
 
 # Load environment variables from .env file
 load_dotenv()
@@ -140,6 +142,39 @@ def sync() -> None:
 
     typer.echo(f"\nTranscripts extracted: {transcripts_extracted}/{len(new_videos)}\n")
 
+    #Extract concepts from transcripts
+    typer.echo("Extracting concepts...")
+    try:
+        concept_extractor = ConceptExtractor()
+    except ValueError as e:
+        typer.echo(f"Concept extraction skipped: {str(e)}\n")
+        concept_extractor = None
+
+    concepts_extracted = 0
+    concepts_failed = 0
+
+    if concept_extractor:
+        for i, video in enumerate(new_videos, 1):
+            video_id = video["video_id"]
+
+            # Only extract concepts if transcript was extracted
+            transcript = extractor.get_transcript(video_id)
+            if not transcript:
+                continue
+
+            typer.echo(f"  [{i}/{len(new_videos)}] {video['title'][:50]}...", nl=False)
+
+            concepts, error = concept_extractor.extract_concepts(transcript)
+            if concepts:
+                save_concepts(video_id, concepts)
+                concepts_extracted += 1
+                typer.echo(" ✓")
+            else:
+                concepts_failed += 1
+                typer.echo(f" ✗ ({error})")
+
+        typer.echo(f"\nConcepts extracted: {concepts_extracted}/{len(new_videos)}\n")
+
     #Update sync state
     typer.echo("Updating sync state...")
     new_video_ids = [v["video_id"] for v in new_videos]
@@ -155,6 +190,9 @@ def sync() -> None:
     typer.echo(f"Total videos indexed: {len(already_indexed) + len(new_videos)}")
     typer.echo(f"Transcripts extracted: {transcripts_extracted}")
     typer.echo(f"Transcripts failed: {transcripts_failed}")
+    if concept_extractor:
+        typer.echo(f"Concepts extracted: {concepts_extracted}")
+        typer.echo(f"Concepts failed: {concepts_failed}")
     typer.echo("\n Next step: Run 'yt-rag search <query>' to find videos")
 
 
