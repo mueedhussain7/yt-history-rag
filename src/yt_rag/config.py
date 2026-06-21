@@ -193,3 +193,51 @@ def get_all_transcripts() -> Dict[str, str]:
         transcripts[video_id] = transcript_file.read_text()
 
     return transcripts
+
+
+def get_concepts_dir() -> Path:
+    """Get directory where concepts are stored."""
+    return get_config_dir() / "concepts"
+
+
+def get_concept_path(video_id: str) -> Path:
+    """Get path to a specific concept file."""
+    return get_concepts_dir() / f"{video_id}.json"
+
+
+def save_concepts(video_id: str, concepts: list) -> None:
+    """
+    Save extracted concepts to file.
+
+    Args:
+        video_id: YouTube video ID
+        concepts: List of concept dicts with 'name' and 'description'
+    """
+    concepts_dir = get_concepts_dir()
+    concepts_dir.mkdir(parents=True, exist_ok=True)
+
+    concept_path = get_concept_path(video_id)
+    with open(concept_path, "w") as f:
+        json.dump(concepts, f, indent=2)
+
+
+def load_concepts(video_id: str) -> Optional[list]:
+    """
+    Load extracted concepts from file.
+
+    Args:
+        video_id: YouTube video ID
+
+    Returns:
+        List of concepts or None if not found
+    """
+    concept_path = get_concept_path(video_id)
+    if concept_path.exists():
+        with open(concept_path, "r") as f:
+            return json.load(f)
+    return None
+
+
+def concepts_exist(video_id: str) -> bool:
+    """Check if concepts have been extracted for a video."""
+    return get_concept_path(video_id).exists()
