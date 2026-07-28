@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "yt-rag Watch History Recorder",
+  "version": "1.0.0",
+  "description": "Records your YouTube watch history to yt-rag",
+  "host_permissions": [
+    "https://www.youtube.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://www.youtube.com/*"],
+      "js": ["content_script.js"],
+      "run_at": "document_end"
+    }
+  ],
+  "action": {
+    "default_title": "yt-rag Watch History Recorder"
+  }
+}
