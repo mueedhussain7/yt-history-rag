@@ -20,7 +20,7 @@ class YouTubeAPI:
 
     def fetch_watch_history(self, max_results: int = 50) -> List[Dict[str, Any]]:
         """
-        Fetch videos from the user's watch history.
+        Fetch videos from the user's watch history using activities.
 
         Args:
             max_results: How many videos to get at a time (max 50)
@@ -33,19 +33,32 @@ class YouTubeAPI:
 
         while True:
             try:
-                # Ask YouTube for the next batch of videos
+                # Get watch history activities
                 request = self.youtube.activities().list(
                     part="snippet,contentDetails",
-                    forMine=True,  # Get videos watched by THIS user
+                    mine=True,
                     maxResults=max_results,
                     pageToken=next_page_token,
-                    fields="items(snippet(title,publishedAt),contentDetails(upload(videoId))),nextPageToken",
                 )
                 response = request.execute()
 
-                # Process each video in the response
-                for item in response.get("items", []):
-                    video = self._parse_video_item(item)
+                # Check if API returned no results (endpoint may be disabled)
+                items = response.get("items", [])
+                if not items and not videos:
+                    import sys
+                    print(
+                        "\n⚠️  WARNING: YouTube Data API returned no watch history.\n"
+                        "This endpoint is no longer supported by Google.\n\n"
+                        "Use one of these alternatives instead:\n"
+                        "  1. yt-rag import --provider takeout --file ~/Downloads/watch-history.html\n"
+                        "  2. yt-rag sync --provider browser-extension\n",
+                        file=sys.stderr
+                    )
+                    break
+
+                # Process each activity in the response
+                for item in items:
+                    video = self._parse_activity_item(item)
                     if video:  # Only add if it's a valid video
                         videos.append(video)
 
@@ -55,21 +68,26 @@ class YouTubeAPI:
                     break  # No more pages, we're done
 
             except Exception as e:
-                print(f"Error fetching videos: {str(e)}")
+                import traceback
+                import sys
+                print(f"Error fetching videos: {str(e)}", file=sys.stderr)
+                traceback.print_exc(file=sys.stderr)
                 break
 
         return videos
 
-    def _parse_video_item(self, item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def _parse_activity_item(self, item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
-        Convert YouTube's response into our format.
+        Parse activity item from watch history.
+        Extracts video ID from contentDetails.playlistItem.resourceId.videoId
         """
         try:
             snippet = item.get("snippet", {})
             content_details = item.get("contentDetails", {})
-            upload = content_details.get("upload", {})
+            playlist_item = content_details.get("playlistItem", {})
+            resource_id = playlist_item.get("resourceId", {})
 
-            video_id = upload.get("videoId")
+            video_id = resource_id.get("videoId")
             if not video_id:
                 return None  # Skip if no video ID
 
