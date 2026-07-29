@@ -4,7 +4,8 @@
   "version": "1.0.0",
   "description": "Records your YouTube watch history to yt-rag",
   "host_permissions": [
-    "https://www.youtube.com/*"
+    "https://www.youtube.com/*",
+    "http://localhost:8765/*"
   ],
   "content_scripts": [
     {
@@ -13,6 +14,9 @@
       "run_at": "document_end"
     }
   ],
+  "background": {
+    "service_worker": "background.js"
+  },
   "action": {
     "default_title": "yt-rag Watch History Recorder"
   }
