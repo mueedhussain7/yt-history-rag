@@ -1,9 +1,11 @@
-import subprocess
 import re
-from typing import Optional, Tuple
+import json
+import subprocess
+from typing import Optional, Tuple, List, Dict
 from pathlib import Path
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound
+from yt_dlp import YoutubeDL
 from .config import get_config_dir
 
 
@@ -20,6 +22,14 @@ class TranscriptExtractor:
     def get_transcript_path(self, video_id: str) -> Path:
         """Get the path where transcript will be saved."""
         return self.transcripts_dir / f"{video_id}.txt"
+
+    def get_timestamps_path(self, video_id: str) -> Path:
+        """Get the path where timestamp index will be saved."""
+        return self.transcripts_dir / f"{video_id}.timestamps.json"
+
+    def get_duration_path(self, video_id: str) -> Path:
+        """Get the path where duration metadata will be saved."""
+        return self.transcripts_dir / f"{video_id}.duration.json"
 
     def transcript_exists(self, video_id: str) -> bool:
         """Check if transcript already downloaded."""
@@ -59,56 +69,139 @@ class TranscriptExtractor:
 
     def _extract_with_yt_dlp(self, video_id: str) -> Tuple[Optional[str], Optional[str]]:
         """
-        Try to extract transcript using yt-dlp.
-
-        yt-dlp is a tool that downloads YouTube videos + captions.
+        Extract transcript + metadata using yt-dlp.
+        - Uses CLI for reliable subtitle download + timestamp extraction
+        - Uses extract_info() for metadata-only duration capture (no video download)
+        - Combined approach is efficient: no video download, one subtitle fetch
         """
         try:
-            # Run yt-dlp to get subtitles
-            # --write-auto-subs: Get auto-generated captions if no manual ones
-            # --skip-download: Only get captions, don't download video
-            # --sub-format: Get best quality captions
+            # First: get metadata (duration) using extract_info() — metadata only, no download
+            ydl_opts = {'skip_download': True, 'quiet': True, 'no_warnings': True}
+            duration = None
+
+            try:
+                with YoutubeDL(ydl_opts) as ydl:
+                    url = f"https://www.youtube.com/watch?v={video_id}"
+                    info = ydl.extract_info(url, download=False)
+                    duration = info.get('duration')
+                    if duration:
+                        self._save_duration(video_id, duration)
+            except Exception:
+                pass  # Duration is optional, continue without it
+
+            # Second: download and process subtitles using CLI
             command = [
-                "yt-dlp",
+                "python3", "-m", "yt_dlp",
                 "--write-subs",
                 "--write-auto-subs",
                 "--skip-download",
                 "--sub-format", "best",
-                "--output", "%(id)s",
+                "--output", str(self.transcripts_dir / "%(id)s"),
                 f"https://www.youtube.com/watch?v={video_id}",
             ]
 
-            result = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
+            result = subprocess.run(command, capture_output=True, text=True, timeout=30)
 
             if result.returncode == 0:
-                # yt-dlp succeeded, read the subtitle file
-                # Usually saves as: video_id.en.vtt or similar
+                # Find and read subtitle file
                 subtitle_files = list(self.transcripts_dir.glob(f"{video_id}.*"))
                 if subtitle_files:
-                    # Find the subtitle file (usually .en.vtt or .vtt)
                     subtitle_file = next(
                         (f for f in subtitle_files if f.suffix in [".vtt", ".srt"]),
                         None,
                     )
                     if subtitle_file:
-                        transcript = subtitle_file.read_text()
-                        # Clean up the subtitle file
+                        vtt_text = subtitle_file.read_text()
                         subtitle_file.unlink()
-                        return transcript, None
+
+                        # Process subtitle to extract timestamps
+                        transcript_text, timestamps = self._process_subtitles(vtt_text)
+
+                        if not transcript_text:
+                            return None, "yt-dlp: Failed to process subtitles"
+
+                        # Save timestamp index
+                        if timestamps:
+                            self._save_timestamps(video_id, timestamps)
+
+                        return transcript_text, None
 
             return None, f"yt-dlp failed: {result.stderr}"
 
         except subprocess.TimeoutExpired:
-            return None, "yt-dlp timeout (video too long?)"
-        except FileNotFoundError:
-            return None, "yt-dlp not installed"
+            return None, "yt-dlp timeout"
         except Exception as e:
             return None, f"yt-dlp error: {str(e)}"
+
+    def _process_subtitles(self, vtt_text: str) -> Tuple[Optional[str], List[Dict]]:
+        """
+        Process VTT subtitle text into transcript and timestamp index.
+
+        Args:
+            vtt_text: Raw VTT format subtitle text
+
+        Returns:
+            (transcript_text, timestamps_list)
+        """
+        if not vtt_text:
+            return None, []
+
+        # Extract timestamps while cleaning WEBVTT
+        lines = vtt_text.split('\n')
+        transcript_lines = []
+        timestamps = []
+        current_time = None
+
+        for line in lines:
+            # Skip headers
+            if line.startswith('WEBVTT') or line.startswith('Kind:') or line.startswith('Language:'):
+                continue
+
+            # Extract timestamp from VTT format: HH:MM:SS.mmm --> HH:MM:SS.mmm
+            if '-->' in line:
+                match = re.search(r'(\d{2}):(\d{2}):(\d{2})', line)
+                if match:
+                    h, m, s = int(match.group(1)), int(match.group(2)), int(match.group(3))
+                    current_time = h * 3600 + m * 60 + s
+                continue
+
+            # Skip standalone timestamp lines
+            if re.match(r'^\d{2}:\d{2}:\d{2}\.\d{3}', line):
+                continue
+
+            # Clean inline tags and markup
+            cleaned = re.sub(r'<\d{2}:\d{2}:\d{2}\.\d{3}><c>', '', line)
+            cleaned = re.sub(r'</c>', '', cleaned)
+            cleaned = cleaned.strip()
+
+            if not cleaned:
+                continue
+
+            # Skip duplicates
+            if transcript_lines and cleaned == transcript_lines[-1]:
+                continue
+
+            transcript_lines.append(cleaned)
+
+            # Record timestamp if available
+            if current_time is not None:
+                timestamps.append({
+                    "timestamp": current_time,
+                    "text": cleaned
+                })
+
+        transcript_text = '\n'.join(transcript_lines)
+        return transcript_text if transcript_text else None, timestamps
+
+    def _save_duration(self, video_id: str, duration: int) -> None:
+        """Save video duration in seconds."""
+        path = self.get_duration_path(video_id)
+        path.write_text(json.dumps({"video_id": video_id, "duration_seconds": duration}))
+
+    def _save_timestamps(self, video_id: str, timestamps: List[Dict]) -> None:
+        """Save timestamp index for Neo4j Timestamp nodes."""
+        path = self.get_timestamps_path(video_id)
+        path.write_text(json.dumps(timestamps, indent=2))
 
     def _extract_with_youtube_api(self, video_id: str) -> Tuple[Optional[str], Optional[str]]:
         """
