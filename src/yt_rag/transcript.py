@@ -1,4 +1,5 @@
 import subprocess
+import re
 from typing import Optional, Tuple
 from pathlib import Path
 from youtube_transcript_api import YouTubeTranscriptApi
@@ -45,13 +46,13 @@ class TranscriptExtractor:
         transcript, error = self._extract_with_yt_dlp(video_id)
         if transcript:
             self._save_transcript(video_id, transcript)
-            return transcript, None
+            return self._load_transcript(video_id), None
 
         # Try Method 2: youtube-transcript-api (fallback)
         transcript, error = self._extract_with_youtube_api(video_id)
         if transcript:
             self._save_transcript(video_id, transcript)
-            return transcript, None
+            return self._load_transcript(video_id), None
 
         # Both methods failed
         return None, error
@@ -111,16 +112,16 @@ class TranscriptExtractor:
 
     def _extract_with_youtube_api(self, video_id: str) -> Tuple[Optional[str], Optional[str]]:
         """
-        Try to extract transcript using youtube-transcript-api.
-        Python library that gets transcripts via YouTube's API.
+        Try to extract transcript using youtube-transcript-api (v1.2.4+).
+        Uses instance-based API: YouTubeTranscriptApi().fetch(video_id)
         """
         try:
-            # Get transcript
-            transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
+            # Get transcript using the new instance-based API
+            fetched_transcript = YouTubeTranscriptApi().fetch(video_id)
 
-            # Convert to text format
-            # transcript_list is list of dicts: [{"text": "hello", "start": 0, "duration": 1}, ...]
-            transcript_text = "\n".join([item["text"] for item in transcript_list])
+            # fetched_transcript is a FetchedTranscript object, convert to text
+            # Each item is a FetchedTranscriptSnippet with .text, .start, .duration attributes
+            transcript_text = "\n".join([item.text for item in fetched_transcript])
 
             return transcript_text, None
 
@@ -131,10 +132,39 @@ class TranscriptExtractor:
         except Exception as e:
             return None, f"youtube-transcript-api error: {str(e)}"
 
+    def _clean_webvtt(self, text: str) -> str:
+        """
+        Clean WEBVTT caption markup from raw transcript.
+        Removes headers, timestamps, inline tags, and deduplicates.
+        """
+        lines = []
+
+        for line in text.split('\n'):
+            if line.startswith('WEBVTT') or line.startswith('Kind:') or line.startswith('Language:'):
+                continue
+
+            if '-->' in line or re.match(r'^\d{2}:\d{2}:\d{2}\.\d{3}', line):
+                continue
+
+            cleaned = re.sub(r'<\d{2}:\d{2}:\d{2}\.\d{3}><c>', '', line)
+            cleaned = re.sub(r'</c>', '', cleaned)
+            cleaned = cleaned.strip()
+
+            if not cleaned:
+                continue
+
+            if lines and cleaned == lines[-1]:
+                continue
+
+            lines.append(cleaned)
+
+        return '\n'.join(lines)
+
     def _save_transcript(self, video_id: str, transcript: str) -> None:
-        """Save transcript to file."""
+        """Save transcript to file, with WEBVTT markup cleaned."""
+        clean_transcript = self._clean_webvtt(transcript)
         path = self.get_transcript_path(video_id)
-        path.write_text(transcript)
+        path.write_text(clean_transcript)
 
     def _load_transcript(self, video_id: str) -> Optional[str]:
         """Load previously saved transcript."""
