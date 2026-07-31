@@ -1,4 +1,10 @@
 .DS_Store
 .env
 src/**/*.egg-info
-
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.claude/
+*.vtt
+*.live_chat.json
