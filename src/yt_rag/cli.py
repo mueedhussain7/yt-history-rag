@@ -353,10 +353,14 @@ def _process_videos(videos: list, typer_echo=typer.echo) -> None:
             typer_echo(f"  [{i}/{len(new_videos)}] {video['title'][:50]}...", nl=False)
 
             try:
+                # Load timestamps for this video (for chunk-to-timestamp mapping)
+                timestamps = load_timestamps(video_id)
+
                 chunks_count = embedding_generator.embed_and_store(
                     video_id,
                     video["title"],
-                    transcript
+                    transcript,
+                    timestamps=timestamps
                 )
                 embeddings_generated += 1
                 typer_echo(f" ✓ ({chunks_count} chunks)")
@@ -587,6 +591,15 @@ def search(query: str) -> None:
         typer.echo(f"{i}. Video: {result['video_title']}")
         typer.echo(f"   Similarity: {result['similarity_score']}")
         typer.echo(f"   Chunk: {result['chunk_text'][:100]}...")
+
+        # Show timestamp URL if available
+        if "start_seconds" in result:
+            start_sec = result["start_seconds"]
+            timestamp_url = f"https://youtube.com/watch?v={result['video_id']}&t={start_sec}s"
+            typer.echo(f"   Link: {timestamp_url}")
+        else:
+            typer.echo("   Link: (timestamp not available)")
+
         typer.echo()
 
 

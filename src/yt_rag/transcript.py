@@ -1,6 +1,7 @@
 import re
 import json
 import subprocess
+import html
 from typing import Optional, Tuple, List, Dict
 from pathlib import Path
 from youtube_transcript_api import YouTubeTranscriptApi
@@ -169,9 +170,10 @@ class TranscriptExtractor:
             if re.match(r'^\d{2}:\d{2}:\d{2}\.\d{3}', line):
                 continue
 
-            # Clean inline tags and markup
+            # Clean inline tags, markup, and HTML entities
             cleaned = re.sub(r'<\d{2}:\d{2}:\d{2}\.\d{3}><c>', '', line)
             cleaned = re.sub(r'</c>', '', cleaned)
+            cleaned = html.unescape(cleaned)
             cleaned = cleaned.strip()
 
             if not cleaned:
@@ -228,7 +230,7 @@ class TranscriptExtractor:
     def _clean_webvtt(self, text: str) -> str:
         """
         Clean WEBVTT caption markup from raw transcript.
-        Removes headers, timestamps, inline tags, and deduplicates.
+        Removes headers, timestamps, inline tags, HTML entities, and deduplicates.
         """
         lines = []
 
@@ -241,6 +243,7 @@ class TranscriptExtractor:
 
             cleaned = re.sub(r'<\d{2}:\d{2}:\d{2}\.\d{3}><c>', '', line)
             cleaned = re.sub(r'</c>', '', cleaned)
+            cleaned = html.unescape(cleaned)
             cleaned = cleaned.strip()
 
             if not cleaned:

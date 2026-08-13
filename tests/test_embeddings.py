@@ -26,9 +26,10 @@ class TestEmbeddingGenerator:
         chunks = generator.chunk_transcript(transcript, chunk_size=2)
 
         # Should create 4 chunks (8 sentences / 2 per chunk)
+        # chunks now returns (chunk_text, start_seconds, end_seconds) tuples
         assert len(chunks) == 4
-        assert "Sentence one" in chunks[0]
-        assert "Sentence two" in chunks[0]
+        assert "Sentence one" in chunks[0][0]
+        assert "Sentence two" in chunks[0][0]
 
     def test_chunk_transcript_uneven(self, temp_config_dir):
         """Test chunking with uneven number of sentences."""
@@ -38,8 +39,9 @@ class TestEmbeddingGenerator:
         chunks = generator.chunk_transcript(transcript, chunk_size=2)
 
         # Should create 3 chunks (5 sentences with chunk_size=2)
+        # chunks now returns (chunk_text, start_seconds, end_seconds) tuples
         assert len(chunks) == 3
-        assert len(chunks[-1].split()) <= 4  # Last chunk has 1 sentence
+        assert len(chunks[-1][0].split()) <= 4  # Last chunk has 1 sentence
 
     def test_chunk_transcript_empty(self, temp_config_dir):
         """Test chunking empty transcript."""
