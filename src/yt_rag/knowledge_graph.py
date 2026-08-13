@@ -84,12 +84,9 @@ class KnowledgeGraph:
             text: Transcript snippet at this time
         """
         query = """
-            CREATE (t:Timestamp {
-                timestamp_seconds: $timestamp_seconds,
-                text: $text,
-                video_id: $video_id,
-                created_at: datetime()
-            })
+            MERGE (t:Timestamp {video_id: $video_id, timestamp_seconds: $timestamp_seconds})
+            SET t.text = $text,
+                t.created_at = datetime()
         """
         self.driver.execute(query, {
             "timestamp_seconds": timestamp_seconds,
@@ -109,8 +106,8 @@ class KnowledgeGraph:
         query = """
             MATCH (v:Video {video_id: $video_id})
             MATCH (c:Concept {name: $concept_name})
-            MERGE (v)-[rel:contains {occurrence_count: $occurrence_count}]->(c)
-            ON CREATE SET rel.created_at = datetime()
+            MERGE (v)-[rel:contains]->(c)
+            SET rel.occurrence_count = $occurrence_count, rel.created_at = datetime()
         """
         self.driver.execute(query, {
             "video_id": video_id,
@@ -189,8 +186,8 @@ class KnowledgeGraph:
         query1 = """
             MATCH (c1:Concept {name: $concept1_name})
             MATCH (c2:Concept {name: $concept2_name})
-            MERGE (c1)-[rel:co_occurs_with {confidence_score: $confidence_score}]->(c2)
-            ON CREATE SET rel.created_at = datetime()
+            MERGE (c1)-[rel:co_occurs_with]->(c2)
+            SET rel.confidence_score = $confidence_score, rel.created_at = datetime()
         """
         self.driver.execute(query1, {
             "concept1_name": concept1_name,
@@ -202,8 +199,8 @@ class KnowledgeGraph:
         query2 = """
             MATCH (c1:Concept {name: $concept1_name})
             MATCH (c2:Concept {name: $concept2_name})
-            MERGE (c2)-[rel:co_occurs_with {confidence_score: $confidence_score}]->(c1)
-            ON CREATE SET rel.created_at = datetime()
+            MERGE (c2)-[rel:co_occurs_with]->(c1)
+            SET rel.confidence_score = $confidence_score, rel.created_at = datetime()
         """
         self.driver.execute(query2, {
             "concept1_name": concept1_name,

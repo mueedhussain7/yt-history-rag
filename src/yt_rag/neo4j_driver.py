@@ -49,6 +49,7 @@ class Neo4jDriver:
         constraints = [
             "CREATE CONSTRAINT video_id IF NOT EXISTS FOR (v:Video) REQUIRE v.video_id IS UNIQUE",
             "CREATE CONSTRAINT concept_name IF NOT EXISTS FOR (c:Concept) REQUIRE c.name IS UNIQUE",
+            "CREATE CONSTRAINT timestamp_unique IF NOT EXISTS FOR (t:Timestamp) REQUIRE (t.video_id, t.timestamp_seconds) IS UNIQUE",
             "CREATE INDEX video_title IF NOT EXISTS FOR (v:Video) ON (v.title)",
         ]
 

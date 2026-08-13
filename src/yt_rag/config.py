@@ -241,3 +241,67 @@ def load_concepts(video_id: str) -> Optional[list]:
 def concepts_exist(video_id: str) -> bool:
     """Check if concepts have been extracted for a video."""
     return get_concept_path(video_id).exists()
+
+
+def load_timestamps(video_id: str) -> Optional[list]:
+    """
+    Load transcript timestamps from file.
+
+    Args:
+        video_id: YouTube video ID
+
+    Returns:
+        List of timestamps or None if not found
+    """
+    timestamps_path = get_config_dir() / "transcripts" / f"{video_id}.timestamps.json"
+    if timestamps_path.exists():
+        with open(timestamps_path, "r") as f:
+            return json.load(f)
+    return None
+
+
+def find_timestamps_for_concept(concept_name: str, timestamps_data: list) -> list:
+    """
+    Find timestamps where concept appears using word-based matching (Option A).
+
+    Splits concept name into significant words (len > 2, not stop words),
+    matches if any word appears in timestamp text.
+
+    Args:
+        concept_name: Concept name (e.g., "Neural Networks")
+        timestamps_data: List of {"timestamp": int, "text": str} dicts
+
+    Returns:
+        List of timestamp_seconds matching the concept
+    """
+    import string
+
+    stop_words = {
+        'the', 'a', 'an', 'and', 'or', 'is', 'are', 'was', 'were',
+        'to', 'of', 'in', 'on', 'at', 'by', 'with', 'from', 'as',
+        'that', 'this', 'it', 'for', 'be', 'have', 'has', 'had',
+        'do', 'does', 'did', 'can', 'could', 'will', 'would', 'may',
+        'might', 'must', 'should', 'shall', 'about', 'above', 'after'
+    }
+
+    # Extract significant words from concept name
+    words = concept_name.lower().translate(
+        str.maketrans('', '', string.punctuation)
+    ).split()
+    significant_words = [w for w in words if w and w not in stop_words and len(w) > 2]
+
+    if not significant_words:
+        return []
+
+    matching_timestamps = []
+    for ts_entry in timestamps_data:
+        text = ts_entry["text"].lower().translate(
+            str.maketrans('', '', string.punctuation)
+        )
+        text_words = text.split()
+
+        # Match if ANY significant word appears in timestamp text
+        if any(word in text_words for word in significant_words):
+            matching_timestamps.append(ts_entry["timestamp"])
+
+    return matching_timestamps

@@ -12,6 +12,9 @@ from .config import (
     load_sync_state,
     update_sync_state,
     save_concepts,
+    load_concepts,
+    load_timestamps,
+    find_timestamps_for_concept,
 )
 from .oauth import authenticate_youtube, is_authenticated
 from .providers import (
@@ -23,6 +26,9 @@ from .transcript import TranscriptExtractor
 from .concepts import ConceptExtractor
 from .embeddings import EmbeddingGenerator
 from .search import TranscriptSearcher
+from .neo4j_driver import Neo4jDriver
+from .knowledge_graph import KnowledgeGraph
+from .concept_deduplication import ConceptDeduplicator
 
 # Load environment variables from .env file
 load_dotenv()
@@ -53,6 +59,79 @@ def _process_videos(videos: list, typer_echo=typer.echo) -> None:
     if not new_videos:
         typer_echo("Nothing new to process!")
         return
+
+    # Initialize Neo4j knowledge graph (Phase 1: Connection + Schema)
+    typer_echo("Initializing knowledge graph...")
+    kg_driver = None
+    kg = None
+    deduplicator = None
+
+    try:
+        kg_driver = Neo4jDriver()
+        kg_driver.create_schema()
+        kg = KnowledgeGraph(kg_driver)
+        deduplicator = ConceptDeduplicator(kg)
+        typer_echo("✓ Knowledge graph ready\n")
+    except Exception as e:
+        typer_echo(f"✗ Knowledge graph unavailable: {str(e)}\n")
+        kg_driver = None
+        kg = None
+        deduplicator = None
+
+    # Phase 2: Create Video nodes in Neo4j
+    graph_videos = 0
+    graph_failed = 0
+
+    if kg:
+        typer_echo("Creating video nodes...")
+        for i, video in enumerate(new_videos, 1):
+            video_id = video["video_id"]
+            typer_echo(f"  [{i}/{len(new_videos)}] {video['title'][:50]}...", nl=False)
+
+            try:
+                kg.create_video_node(
+                    video_id=video_id,
+                    title=video["title"],
+                    url=video.get("url", ""),
+                    watch_date=video.get("watch_date", ""),
+                    duration_seconds=video.get("duration_seconds", 0),
+                    provider=video.get("provider", "unknown"),
+                )
+                graph_videos += 1
+                typer_echo(" ✓")
+            except Exception as e:
+                graph_failed += 1
+                typer_echo(f" ✗ ({str(e)[:30]})")
+
+        typer_echo(f"\nVideo nodes created: {graph_videos}/{len(new_videos)}\n")
+
+        # Phase 3: Create Timestamp nodes in Neo4j
+        typer_echo("Creating timestamp nodes...")
+        timestamps_processed = 0
+        timestamps_failed = 0
+
+        for i, video in enumerate(new_videos, 1):
+            video_id = video["video_id"]
+
+            try:
+                # Load timestamps for this video
+                timestamps_data = load_timestamps(video_id)
+                if not timestamps_data:
+                    continue
+
+                # Create Timestamp node for each entry (uses MERGE for idempotency)
+                for ts_entry in timestamps_data:
+                    kg.create_timestamp_node(
+                        video_id=video_id,
+                        timestamp_seconds=ts_entry["timestamp"],
+                        text=ts_entry["text"]
+                    )
+                    timestamps_processed += 1
+
+            except Exception as e:
+                timestamps_failed += 1
+
+        typer_echo(f"Timestamp nodes created: {timestamps_processed}\n")
 
     # Extract transcripts from new videos
     typer_echo("Extracting transcripts...")
@@ -107,6 +186,150 @@ def _process_videos(videos: list, typer_echo=typer.echo) -> None:
 
         typer_echo(f"\nConcepts extracted: {concepts_extracted}/{len(new_videos)}\n")
 
+    # Phase 4, 5, & 6: Build Neo4j knowledge graph (NOW that concepts exist)
+    # REORDERED: Concepts must be extracted BEFORE deduplicating them in Neo4j
+    if kg:
+        # Phase 4 & 5 (Combined): Deduplicate concepts + create all relationships
+        typer_echo("Deduplicating concepts and creating relationships...")
+        concepts_deduped = 0
+        concepts_created = 0
+        contains_relationships = 0
+        appears_at_rels = 0
+        introduced_in_rels = 0
+
+        for i, video in enumerate(new_videos, 1):
+            video_id = video["video_id"]
+
+            try:
+                # Load concepts and timestamps for this video
+                concepts = load_concepts(video_id)
+                timestamps_data = load_timestamps(video_id)
+
+                if not concepts or not timestamps_data:
+                    continue
+
+                # Process each concept (SINGLE PASS - dedup runs once)
+                for concept in concepts:
+                    concepts_deduped += 1
+
+                    # 1. Deduplicate via ConceptDeduplicator (Chroma similarity check)
+                    deduped_results = deduplicator.deduplicate_concepts(
+                        [concept],
+                        video_id=video_id,
+                        similarity_threshold=0.85
+                    )
+
+                    concept_name_to_use = deduped_results[0][0]
+                    is_new = deduped_results[0][1]
+
+                    if is_new:
+                        concepts_created += 1
+
+                    # 2. Find matching timestamps for this concept (word-based)
+                    matching_ts = find_timestamps_for_concept(
+                        concept_name_to_use,
+                        timestamps_data
+                    )
+
+                    # 3. Create contains relationship with accurate occurrence_count
+                    occurrence_count = max(1, len(matching_ts))
+
+                    kg.create_contains_relationship(
+                        video_id=video_id,
+                        concept_name=concept_name_to_use,
+                        occurrence_count=occurrence_count
+                    )
+                    contains_relationships += 1
+
+                    # 4. Create appears_at for all matching timestamps
+                    for ts_seconds in matching_ts:
+                        kg.create_appears_at_relationship(
+                            concept_name=concept_name_to_use,
+                            video_id=video_id,
+                            timestamp_seconds=ts_seconds
+                        )
+                        appears_at_rels += 1
+
+                    # 5. Create introduced_in for first (earliest) timestamp
+                    if matching_ts:
+                        first_ts = min(matching_ts)
+                        kg.create_introduced_in_relationship(
+                            concept_name=concept_name_to_use,
+                            video_id=video_id,
+                            timestamp_seconds=first_ts
+                        )
+                        introduced_in_rels += 1
+
+            except Exception as e:
+                pass
+
+        typer_echo(f"Concepts deduped: {concepts_deduped}")
+        typer_echo(f"Concepts created: {concepts_created}")
+        typer_echo(f"Contains relationships: {contains_relationships}")
+        typer_echo(f"Appears_at relationships: {appears_at_rels}")
+        typer_echo(f"Introduced_in relationships: {introduced_in_rels}\n")
+
+        # Phase 6: Create co_occurs_with bidirectional relationships
+        typer_echo("Creating co-occurrence relationships...")
+        cooccurs_relationships = 0
+
+        for i, video in enumerate(new_videos, 1):
+            video_id = video["video_id"]
+
+            try:
+                concepts = load_concepts(video_id)
+                timestamps_data = load_timestamps(video_id)
+
+                if not concepts or not timestamps_data or len(concepts) < 2:
+                    continue
+
+                concept_timestamps = {}
+
+                for concept in concepts:
+                    deduped_results = deduplicator.deduplicate_concepts(
+                        [concept],
+                        video_id=video_id,
+                        similarity_threshold=0.85
+                    )
+
+                    concept_name = deduped_results[0][0]
+                    matching_ts = find_timestamps_for_concept(
+                        concept_name,
+                        timestamps_data
+                    )
+
+                    if matching_ts:
+                        concept_timestamps[concept_name] = matching_ts
+
+                concept_names = list(concept_timestamps.keys())
+
+                for i in range(len(concept_names)):
+                    for j in range(i + 1, len(concept_names)):
+                        concept1 = concept_names[i]
+                        concept2 = concept_names[j]
+
+                        ts1_list = concept_timestamps[concept1]
+                        ts2_list = concept_timestamps[concept2]
+
+                        score_1_to_2, score_2_to_1 = deduplicator.calculate_co_occurrence_scores(
+                            ts1_list,
+                            ts2_list,
+                            proximity_window=60
+                        )
+
+                        kg.create_co_occurs_with_relationship(
+                            concept1_name=concept1,
+                            concept2_name=concept2,
+                            confidence_score_1_to_2=score_1_to_2,
+                            confidence_score_2_to_1=score_2_to_1
+                        )
+                        cooccurs_relationships += 2
+
+            except Exception as e:
+                pass
+
+        typer_echo(f"Co-occurrence relationships: {cooccurs_relationships}\n")
+
     # Generate embeddings for transcripts
     typer_echo("Generating embeddings...")
     try:
@@ -152,6 +375,10 @@ def _process_videos(videos: list, typer_echo=typer.echo) -> None:
     except Exception as e:
         typer_echo(f"Error saving sync state: {str(e)}")
         return
+
+    # Cleanup Neo4j connection
+    if kg_driver:
+        kg_driver.close()
 
     # Show summary
     typer_echo("Processing complete!")
