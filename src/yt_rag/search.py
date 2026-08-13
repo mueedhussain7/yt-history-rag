@@ -1,4 +1,4 @@
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from sentence_transformers import SentenceTransformer
 import chromadb
 from .config import get_config_dir
@@ -43,6 +43,8 @@ class TranscriptSearcher:
                 "video_title": "...",
                 "chunk_text": "...",
                 "similarity_score": 0.95,
+                "start_seconds": 123,  (optional, None if not available)
+                "end_seconds": 145,    (optional, None if not available)
             }
         """
         if not self.collection:
@@ -66,11 +68,19 @@ class TranscriptSearcher:
                 # Convert distance to similarity (cosine distance to similarity)
                 similarity = 1 - distance
 
-                formatted_results.append({
+                result = {
                     "video_id": metadata["video_id"],
                     "video_title": metadata["video_title"],
                     "chunk_text": chunk_text,
                     "similarity_score": round(similarity, 3),
-                })
+                }
+
+                # Add timestamps if available
+                if "start_seconds" in metadata:
+                    result["start_seconds"] = metadata["start_seconds"]
+                if "end_seconds" in metadata:
+                    result["end_seconds"] = metadata["end_seconds"]
+
+                formatted_results.append(result)
 
         return formatted_results
