@@ -3,6 +3,7 @@ load_dotenv()
 
 import typer
 import os
+import re
 from pathlib import Path
 from typing import Optional
 from .config import (
@@ -589,8 +590,17 @@ def search(query: str) -> None:
 
     for i, result in enumerate(results, 1):
         typer.echo(f"{i}. Video: {result['video_title']}")
-        typer.echo(f"   Similarity: {result['similarity_score']}")
-        typer.echo(f"   Chunk: {result['chunk_text'][:100]}...")
+        typer.echo(f"   Relevance: {result['similarity_score']}%")
+
+        # Truncate snippet to first 1-2 sentences for display
+        chunk_text = result['chunk_text']
+        # Normalize whitespace (newlines → spaces) and split on sentence boundaries
+        normalized = re.sub(r'\s+', ' ', chunk_text).strip()
+        sentences = re.split(r'(?<=[.!?])\s+', normalized)
+        display_snippet = ' '.join(sentences[:2])
+        if len(sentences) > 2:
+            display_snippet += '...'
+        typer.echo(f"   Snippet: {display_snippet}")
 
         # Show timestamp URL if available
         if "start_seconds" in result:
