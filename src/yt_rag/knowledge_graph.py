@@ -1,4 +1,4 @@
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any
 from datetime import datetime
 from .neo4j_driver import Neo4jDriver
 
@@ -239,3 +239,146 @@ class KnowledgeGraph:
         if results:
             return dict(results[0]["v"])
         return None
+
+    def get_related_concepts(self, concept_names: List[str]) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Get concepts that co-occur with the given concepts.
+
+        Args:
+            concept_names: List of concept names to find related concepts for
+
+        Returns:
+            Dict mapping concept_name -> list of related concepts with confidence scores
+            Format: {"concept": {"related_concept": confidence_score, ...}}
+        """
+        if not concept_names:
+            return {}
+
+        query = """
+            MATCH (c1:Concept)-[r:co_occurs_with]->(c2:Concept)
+            WHERE c1.name IN $concept_names
+            RETURN c1.name as source_concept, c2.name as related_concept, r.confidence_score as confidence
+        """
+        results = self.driver.query(query, {"concept_names": concept_names})
+
+        # Organize by source concept
+        related = {}
+        for r in results:
+            source = r["source_concept"]
+            if source not in related:
+                related[source] = {}
+            related[source][r["related_concept"]] = r["confidence"]
+
+        return related
+
+    def get_concept_provenance(self, concept_names: List[str]) -> Dict[str, Dict[str, Any]]:
+        """
+        Get first mention (provenance) for each concept.
+
+        Args:
+            concept_names: List of concept names
+
+        Returns:
+            Dict mapping concept_name -> {video_id, video_title, timestamp_seconds}
+        """
+        if not concept_names:
+            return {}
+
+        query = """
+            MATCH (c:Concept)-[:introduced_in]->(t:Timestamp)
+            WHERE c.name IN $concept_names
+            MATCH (v:Video {video_id: t.video_id})
+            RETURN c.name as concept, v.video_id as video_id, v.title as video_title, t.timestamp_seconds as timestamp
+        """
+        results = self.driver.query(query, {"concept_names": concept_names})
+
+        # One entry per concept (first mention)
+        provenance = {}
+        for r in results:
+            concept = r["concept"]
+            if concept not in provenance:  # Keep first mention only
+                provenance[concept] = {
+                    "video_id": r["video_id"],
+                    "video_title": r["video_title"],
+                    "timestamp_seconds": r["timestamp"],
+                }
+
+        return provenance
+
+    def get_concept_frequency(self, concept_names: List[str]) -> Dict[str, int]:
+        """
+        Get how many videos discuss each concept.
+
+        Args:
+            concept_names: List of concept names
+
+        Returns:
+            Dict mapping concept_name -> count of videos discussing it
+        """
+        if not concept_names:
+            return {}
+
+        query = """
+            MATCH (c:Concept)<-[:contains]-(v:Video)
+            WHERE c.name IN $concept_names
+            RETURN c.name as concept, COUNT(DISTINCT v) as video_count
+        """
+        results = self.driver.query(query, {"concept_names": concept_names})
+
+        return {r["concept"]: r["video_count"] for r in results}
+
+    def get_concepts_for_chunk(
+        self,
+        video_id: str,
+        start_seconds: Optional[int] = None,
+        end_seconds: Optional[int] = None,
+        window_margin: int = 30
+    ) -> List[str]:
+        """
+        Get concepts for a specific chunk using timestamp-window matching (Tier 1).
+        Falls back to all video concepts if no timestamp available (Tier 2).
+
+        Tier 1 (precise): For chunks with start/end_seconds, find concepts that appear_at
+        timestamps within [start_seconds - margin, end_seconds + margin].
+
+        Tier 2 (fallback): If no confident Tier 1 match or no timestamps, return all
+        concepts for the video.
+
+        Args:
+            video_id: YouTube video ID
+            start_seconds: Start timestamp of chunk (optional)
+            end_seconds: End timestamp of chunk (optional)
+            window_margin: Seconds before/after chunk to include in match window
+
+        Returns:
+            List of concept names relevant to this chunk
+        """
+        # Tier 1: Precise timestamp-window matching
+        if start_seconds is not None and end_seconds is not None:
+            window_start = max(0, start_seconds - window_margin)
+            window_end = end_seconds + window_margin
+
+            query = """
+                MATCH (c:Concept)-[appears:appears_at]->(t:Timestamp)
+                WHERE t.video_id = $video_id
+                  AND t.timestamp_seconds >= $window_start
+                  AND t.timestamp_seconds <= $window_end
+                RETURN DISTINCT c.name as concept
+            """
+            results = self.driver.query(query, {
+                "video_id": video_id,
+                "window_start": window_start,
+                "window_end": window_end,
+            })
+
+            tier1_concepts = [r["concept"] for r in results]
+            if tier1_concepts:
+                return tier1_concepts
+
+        # Tier 2: Fallback to all video concepts
+        query = """
+            MATCH (v:Video {video_id: $video_id})-[:contains]->(c:Concept)
+            RETURN DISTINCT c.name as concept
+        """
+        results = self.driver.query(query, {"video_id": video_id})
+        return [r["concept"] for r in results]
