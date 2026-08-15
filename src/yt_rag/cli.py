@@ -4,8 +4,9 @@ load_dotenv()
 import typer
 import os
 import re
+import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 from .config import (
     get_config_dir,
     create_config_template,
@@ -539,6 +540,77 @@ def import_videos(
     typer.echo("\nNext step: Run 'yt-rag search <query>' to find videos")
 
 
+def _enrich_search_results(results: List[dict], typer_echo=typer.echo) -> tuple[List[dict], float]:
+    """
+    Enrich search results with Neo4j knowledge graph data.
+
+    For each search result, fetches related concepts, provenance, and frequency data.
+    Returns enriched results and elapsed time.
+    """
+    if not results:
+        return results, 0.0
+
+    start_time = time.time()
+
+    try:
+        # Initialize Neo4j connection
+        kg_driver = Neo4jDriver()
+        kg = KnowledgeGraph(kg_driver)
+
+        # Collect concepts for each result using timestamp-window matching (Tier 1)
+        # Falls back to all video concepts if no confident timestamps (Tier 2)
+        all_concepts = set()
+        result_concepts = {}
+
+        for i, result in enumerate(results):
+            video_id = result["video_id"]
+            start_sec = result.get("start_seconds")
+            end_sec = result.get("end_seconds")
+
+            concepts = kg.get_concepts_for_chunk(video_id, start_sec, end_sec)
+            result_concepts[i] = concepts
+            all_concepts.update(concepts)
+
+        # If no concepts found, return results as-is
+        if not all_concepts:
+            kg_driver.close()
+            elapsed = time.time() - start_time
+            return results, elapsed
+
+        concept_list = list(all_concepts)
+
+        # Batch-query all enrichment data once
+        related = kg.get_related_concepts(concept_list)
+        provenance = kg.get_concept_provenance(concept_list)
+        frequency = kg.get_concept_frequency(concept_list)
+
+        # Attach enriched data to each result
+        for i, result in enumerate(results):
+            concepts = result_concepts.get(i, [])
+
+            # Build enriched concept data
+            enriched_concepts = []
+            for concept in concepts:
+                concept_data = {
+                    "name": concept,
+                    "related": related.get(concept, {}),
+                    "first_mentioned_in": provenance.get(concept),
+                    "discussed_in_videos": frequency.get(concept, 0)
+                }
+                enriched_concepts.append(concept_data)
+
+            result["enriched_concepts"] = enriched_concepts
+
+        kg_driver.close()
+        elapsed = time.time() - start_time
+        return results, elapsed
+
+    except Exception as e:
+        # Graceful degradation: return results without enrichment
+        elapsed = time.time() - start_time
+        return results, elapsed
+
+
 @app.command()
 def serve_extension() -> None:
     """
@@ -586,9 +658,12 @@ def search(query: str) -> None:
         typer.echo("No results found. Try running 'yt-rag sync' first.")
         return
 
-    typer.echo(f"Found {len(results)} results:\n")
+    # Enrich results with Neo4j knowledge graph data
+    enriched_results, enrichment_time = _enrich_search_results(results)
 
-    for i, result in enumerate(results, 1):
+    typer.echo(f"Found {len(enriched_results)} results:\n")
+
+    for i, result in enumerate(enriched_results, 1):
         typer.echo(f"{i}. Video: {result['video_title']}")
         typer.echo(f"   Relevance: {result['similarity_score']}%")
 
@@ -610,7 +685,25 @@ def search(query: str) -> None:
         else:
             typer.echo("   Link: (timestamp not available)")
 
+        # Show enriched concepts if available
+        if "enriched_concepts" in result and result["enriched_concepts"]:
+            typer.echo(f"   Related concepts:")
+            for concept_data in result["enriched_concepts"][:3]:  # Show top 3 concepts
+                concept_name = concept_data["name"]
+                video_count = concept_data["discussed_in_videos"]
+                related_count = len(concept_data["related"])
+                typer.echo(f"     • {concept_name} (in {video_count} video{'s' if video_count != 1 else ''}, {related_count} related)")
+
+                # Show first-mention info if available
+                if concept_data["first_mentioned_in"]:
+                    first_mention = concept_data["first_mentioned_in"]
+                    first_ts = first_mention.get("timestamp_seconds", 0)
+                    typer.echo(f"       First mentioned at {first_ts}s")
+
         typer.echo()
+
+    if enrichment_time > 0:
+        typer.echo(f"Enrichment completed in {enrichment_time*1000:.1f}ms")
 
 
 if __name__ == "__main__":
