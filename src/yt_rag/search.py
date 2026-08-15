@@ -72,7 +72,7 @@ class TranscriptSearcher:
                     "video_id": metadata["video_id"],
                     "video_title": metadata["video_title"],
                     "chunk_text": chunk_text,
-                    "similarity_score": round(similarity, 3),
+                    "similarity_score": round(similarity * 100, 1),
                 }
 
                 # Add timestamps if available

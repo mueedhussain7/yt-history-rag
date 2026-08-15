@@ -73,7 +73,7 @@ class TestTranscriptSearcher:
             assert "video_title" in result
             assert "chunk_text" in result
             assert "similarity_score" in result
-            assert 0 <= result["similarity_score"] <= 1
+            assert 0 <= result["similarity_score"] <= 100
 
     def test_search_python(self, populated_searcher):
         """Test searching for Python topic."""
