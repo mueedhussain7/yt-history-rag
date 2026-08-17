@@ -38,35 +38,14 @@ load_dotenv()
 app = typer.Typer(help="YouTube History RAG - Search your YouTube watch history")
 
 
-def _process_videos(videos: list, typer_echo=typer.echo) -> None:
+def _stage_init_neo4j(typer_echo=typer.echo) -> tuple:
     """
-    Internal helper function to process a list of videos through the pipeline.
-    Shared by sync and import commands.
+    Stage 1: Initialize Neo4j connection and create schema.
+
+    CRITICAL: If this fails, abort sync with remediation message.
+    Returns: (driver, knowledge_graph, deduplicator) or (None, None, None) if failed
     """
-    if not videos:
-        typer_echo("No videos to process!")
-        return
-
-    sync_state = load_sync_state()
-    already_indexed = set(sync_state.get("indexed_video_ids", []))
-
-    # Filter out already-indexed videos
-    new_videos = [
-        v for v in videos
-        if v["video_id"] not in already_indexed
-    ]
-    typer_echo(f"New videos to process: {len(new_videos)}")
-    typer_echo(f"Skipping: {len(videos) - len(new_videos)} already indexed\n")
-
-    if not new_videos:
-        typer_echo("Nothing new to process!")
-        return
-
-    # Initialize Neo4j knowledge graph (Phase 1: Connection + Schema)
     typer_echo("Initializing knowledge graph...")
-    kg_driver = None
-    kg = None
-    deduplicator = None
 
     try:
         kg_driver = Neo4jDriver()
@@ -74,72 +53,72 @@ def _process_videos(videos: list, typer_echo=typer.echo) -> None:
         kg = KnowledgeGraph(kg_driver)
         deduplicator = ConceptDeduplicator(kg)
         typer_echo("✓ Knowledge graph ready\n")
+        return kg_driver, kg, deduplicator
     except Exception as e:
-        typer_echo(f"✗ Knowledge graph unavailable: {str(e)}\n")
-        kg_driver = None
-        kg = None
-        deduplicator = None
+        typer_echo(f"\n✗ CRITICAL ERROR: Knowledge graph initialization failed")
+        typer_echo(f"   {str(e)}\n")
+        typer_echo("REMEDIATION:")
+        typer_echo("   - Check that Neo4j is running (docker ps | grep neo4j)")
+        typer_echo("   - Check connection settings in ~/.yt-rag/config.yaml")
+        typer_echo("   - Run: neo4j restart (if using Docker)\n")
+        return None, None, None
 
-    # Phase 2: Create Video nodes in Neo4j
-    graph_videos = 0
-    graph_failed = 0
 
-    if kg:
-        typer_echo("Creating video nodes...")
-        for i, video in enumerate(new_videos, 1):
-            video_id = video["video_id"]
-            typer_echo(f"  [{i}/{len(new_videos)}] {video['title'][:50]}...", nl=False)
+def _stage_create_neo4j_nodes(kg, new_videos, typer_echo=typer.echo) -> dict:
+    """
+    Stage 2: Create Video and Timestamp nodes in Neo4j.
 
-            try:
-                kg.create_video_node(
-                    video_id=video_id,
-                    title=video["title"],
-                    url=video.get("url", ""),
-                    watch_date=video.get("watch_date", ""),
-                    duration_seconds=video.get("duration_seconds", 0),
-                    provider=video.get("provider", "unknown"),
-                )
-                graph_videos += 1
-                typer_echo(" ✓")
-            except Exception as e:
-                graph_failed += 1
-                typer_echo(f" ✗ ({str(e)[:30]})")
+    PER-VIDEO: Log failures but continue sync.
+    Returns: {"success": bool, "videos_created": int, "timestamps_created": int, "errors": [...]}
+    """
+    if not kg:
+        return {"success": False, "videos_created": 0, "timestamps_created": 0, "errors": ["Neo4j unavailable"]}
 
-        typer_echo(f"\nVideo nodes created: {graph_videos}/{len(new_videos)}\n")
+    typer_echo("Creating video nodes...")
+    videos_created = 0
+    timestamps_created = 0
+    errors = []
 
-        # Phase 3: Create Timestamp nodes in Neo4j
-        typer_echo("Creating timestamp nodes...")
-        timestamps_processed = 0
-        timestamps_failed = 0
+    for i, video in enumerate(new_videos, 1):
+        video_id = video["video_id"]
+        typer_echo(f"  [{i}/{len(new_videos)}] {video['title'][:50]}...", nl=False)
 
-        for i, video in enumerate(new_videos, 1):
-            video_id = video["video_id"]
+        try:
+            kg.create_video_node(
+                video_id=video_id,
+                title=video["title"],
+                url=video.get("url", ""),
+                watch_date=video.get("watch_date", ""),
+                duration_seconds=video.get("duration_seconds", 0),
+                provider=video.get("provider", "unknown"),
+            )
+            videos_created += 1
+            typer_echo(" ✓")
+        except Exception as e:
+            errors.append(f"Video {video_id}: {str(e)[:60]}")
+            typer_echo(f" ✗ ({str(e)[:30]})")
 
-            try:
-                # Load timestamps for this video
-                timestamps_data = load_timestamps(video_id)
-                if not timestamps_data:
-                    continue
+    typer_echo(f"\nVideo nodes created: {videos_created}/{len(new_videos)}\n")
 
-                # Create Timestamp node for each entry (uses MERGE for idempotency)
-                for ts_entry in timestamps_data:
-                    kg.create_timestamp_node(
-                        video_id=video_id,
-                        timestamp_seconds=ts_entry["timestamp"],
-                        text=ts_entry["text"]
-                    )
-                    timestamps_processed += 1
+    return {
+        "success": videos_created > 0,
+        "videos_created": videos_created,
+        "timestamps_created": timestamps_created,
+        "errors": errors
+    }
 
-            except Exception as e:
-                timestamps_failed += 1
 
-        typer_echo(f"Timestamp nodes created: {timestamps_processed}\n")
+def _stage_extract_transcripts(new_videos, typer_echo=typer.echo) -> dict:
+    """
+    Stage 3: Extract transcripts from new videos.
 
-    # Extract transcripts from new videos
+    PER-VIDEO: Log failures but continue sync.
+    Returns: {"success": bool, "transcripts_extracted": int, "errors": [...]}
+    """
     typer_echo("Extracting transcripts...")
     extractor = TranscriptExtractor()
     transcripts_extracted = 0
-    transcripts_failed = 0
+    errors = []
 
     for i, video in enumerate(new_videos, 1):
         video_id = video["video_id"]
@@ -150,252 +129,511 @@ def _process_videos(videos: list, typer_echo=typer.echo) -> None:
             transcripts_extracted += 1
             typer_echo(" ✓")
         else:
-            transcripts_failed += 1
+            errors.append(f"Video {video_id}: {error}")
             typer_echo(f" ✗ ({error})")
 
     typer_echo(f"\nTranscripts extracted: {transcripts_extracted}/{len(new_videos)}\n")
 
-    # Extract concepts from transcripts
+    return {
+        "success": transcripts_extracted > 0,
+        "transcripts_extracted": transcripts_extracted,
+        "errors": errors
+    }
+
+
+def _stage_create_timestamp_nodes(kg, new_videos, typer_echo=typer.echo) -> dict:
+    """
+    Stage 4: Create Timestamp nodes in Neo4j.
+
+    Runs AFTER transcript extraction, so .timestamps.json files now exist.
+    PER-VIDEO: Log failures but continue sync.
+    Returns: {"success": bool, "timestamps_created": int, "errors": [...]}
+    """
+    if not kg:
+        return {"success": False, "timestamps_created": 0, "errors": ["Neo4j unavailable"]}
+
+    typer_echo("Creating timestamp nodes...")
+    timestamps_created = 0
+    errors = []
+
+    for video in new_videos:
+        video_id = video["video_id"]
+
+        try:
+            timestamps_data = load_timestamps(video_id)
+            if not timestamps_data:
+                continue
+
+            for ts_entry in timestamps_data:
+                kg.create_timestamp_node(
+                    video_id=video_id,
+                    timestamp_seconds=ts_entry["timestamp"],
+                    text=ts_entry["text"]
+                )
+                timestamps_created += 1
+
+        except Exception as e:
+            errors.append(f"Video {video_id}: {str(e)[:60]}")
+
+    typer_echo(f"Timestamp nodes created: {timestamps_created}\n")
+
+    return {
+        "success": timestamps_created > 0 or len(new_videos) == 0,
+        "timestamps_created": timestamps_created,
+        "errors": errors
+    }
+
+
+def _stage_extract_concepts(new_videos, typer_echo=typer.echo) -> dict:
+    """
+    Stage 5: Extract concepts from transcripts using LLM.
+
+    PER-VIDEO: Log failures but continue sync.
+    Returns: {"success": bool, "concepts_extracted": int, "errors": [...]}
+    """
     typer_echo("Extracting concepts...")
+
+    # Initialize ConceptExtractor (may fail if API unavailable)
     try:
         concept_extractor = ConceptExtractor()
     except ValueError as e:
         typer_echo(f"Concept extraction skipped: {str(e)}\n")
-        concept_extractor = None
+        return {
+            "success": False,
+            "concepts_extracted": 0,
+            "errors": [str(e)]
+        }
 
+    extractor = TranscriptExtractor()
     concepts_extracted = 0
-    concepts_failed = 0
+    errors = []
 
-    if concept_extractor:
-        for i, video in enumerate(new_videos, 1):
-            video_id = video["video_id"]
+    for i, video in enumerate(new_videos, 1):
+        video_id = video["video_id"]
+        typer_echo(f"  [{i}/{len(new_videos)}] {video['title'][:50]}...", nl=False)
 
-            # Only extract concepts if transcript was extracted
-            transcript = extractor.get_transcript(video_id)
-            if not transcript:
-                continue
+        # Load transcript (already extracted in Stage 3)
+        transcript = extractor.get_transcript(video_id)
+        if not transcript:
+            typer_echo(" ✗ (no transcript available)")
+            continue
 
-            typer_echo(f"  [{i}/{len(new_videos)}] {video['title'][:50]}...", nl=False)
-
+        try:
             concepts, error = concept_extractor.extract_concepts(transcript)
             if concepts:
                 save_concepts(video_id, concepts)
                 concepts_extracted += 1
                 typer_echo(" ✓")
             else:
-                concepts_failed += 1
+                errors.append(f"Video {video_id}: {error}")
                 typer_echo(f" ✗ ({error})")
+        except Exception as e:
+            errors.append(f"Video {video_id}: {str(e)[:60]}")
+            typer_echo(f" ✗ ({str(e)[:30]})")
 
-        typer_echo(f"\nConcepts extracted: {concepts_extracted}/{len(new_videos)}\n")
+    typer_echo(f"\nConcepts extracted: {concepts_extracted}/{len(new_videos)}\n")
 
-    # Phase 4, 5, & 6: Build Neo4j knowledge graph (NOW that concepts exist)
-    # REORDERED: Concepts must be extracted BEFORE deduplicating them in Neo4j
-    if kg:
-        # Phase 4 & 5 (Combined): Deduplicate concepts + create all relationships
-        typer_echo("Deduplicating concepts and creating relationships...")
-        concepts_deduped = 0
-        concepts_created = 0
-        contains_relationships = 0
-        appears_at_rels = 0
-        introduced_in_rels = 0
+    return {
+        "success": concepts_extracted > 0,
+        "concepts_extracted": concepts_extracted,
+        "errors": errors
+    }
 
-        for i, video in enumerate(new_videos, 1):
-            video_id = video["video_id"]
 
-            try:
-                # Load concepts and timestamps for this video
-                concepts = load_concepts(video_id)
-                timestamps_data = load_timestamps(video_id)
+def _stage_build_knowledge_graph(kg, deduplicator, new_videos, typer_echo=typer.echo) -> dict:
+    """
+    Stage 6: Deduplicate concepts and build Neo4j knowledge graph relationships.
 
-                if not concepts or not timestamps_data:
-                    continue
+    Combines:
+    - Concept deduplication via Chroma similarity (SINGLE PASS per video)
+    - Creation of contains, appears_at, introduced_in relationships
+    - Creation of co_occurs_with bidirectional relationships
 
-                # Process each concept (SINGLE PASS - dedup runs once)
-                for concept in concepts:
-                    concepts_deduped += 1
+    PER-VIDEO: Log failures but continue sync.
+    Returns: {"success": bool, "contains": int, "appears_at": int, "introduced_in": int,
+              "cooccurs": int, "concepts_created": int, "errors": [...]}
+    """
+    if not kg or not deduplicator:
+        return {
+            "success": False,
+            "contains": 0,
+            "appears_at": 0,
+            "introduced_in": 0,
+            "cooccurs": 0,
+            "concepts_created": 0,
+            "errors": ["Neo4j or deduplicator unavailable"]
+        }
 
-                    # 1. Deduplicate via ConceptDeduplicator (Chroma similarity check)
-                    deduped_results = deduplicator.deduplicate_concepts(
-                        [concept],
-                        video_id=video_id,
-                        similarity_threshold=0.85
-                    )
+    typer_echo("Deduplicating concepts and creating relationships...")
+    concepts_deduped = 0
+    concepts_created = 0
+    contains_count = 0
+    appears_at_count = 0
+    introduced_in_count = 0
+    cooccurs_count = 0
+    errors = []
 
-                    concept_name_to_use = deduped_results[0][0]
-                    is_new = deduped_results[0][1]
+    for i, video in enumerate(new_videos, 1):
+        video_id = video["video_id"]
 
-                    if is_new:
-                        concepts_created += 1
+        try:
+            concepts = load_concepts(video_id)
+            timestamps_data = load_timestamps(video_id)
 
-                    # 2. Find matching timestamps for this concept (word-based)
-                    matching_ts = find_timestamps_for_concept(
-                        concept_name_to_use,
-                        timestamps_data
-                    )
+            if not concepts or not timestamps_data:
+                continue
 
-                    # 3. Create contains relationship with accurate occurrence_count
+            # SINGLE PASS: Deduplicate all concepts once, store results
+            concept_timestamps = {}  # {concept_name: [timestamps]}
+
+            for concept in concepts:
+                concepts_deduped += 1
+
+                # Deduplicate via ConceptDeduplicator (ONCE per concept)
+                deduped_results = deduplicator.deduplicate_concepts(
+                    [concept],
+                    video_id=video_id,
+                    similarity_threshold=0.85
+                )
+
+                concept_name_to_use = deduped_results[0][0]
+                is_new = deduped_results[0][1]
+
+                if is_new:
+                    concepts_created += 1
+
+                # Find matching timestamps for this concept
+                matching_ts = find_timestamps_for_concept(
+                    concept_name_to_use,
+                    timestamps_data
+                )
+
+                if matching_ts:
+                    concept_timestamps[concept_name_to_use] = matching_ts
+
+                    # Create contains relationship
                     occurrence_count = max(1, len(matching_ts))
-
                     kg.create_contains_relationship(
                         video_id=video_id,
                         concept_name=concept_name_to_use,
                         occurrence_count=occurrence_count
                     )
-                    contains_relationships += 1
+                    contains_count += 1
 
-                    # 4. Create appears_at for all matching timestamps
+                    # Create appears_at for all matching timestamps
                     for ts_seconds in matching_ts:
                         kg.create_appears_at_relationship(
                             concept_name=concept_name_to_use,
                             video_id=video_id,
                             timestamp_seconds=ts_seconds
                         )
-                        appears_at_rels += 1
+                        appears_at_count += 1
 
-                    # 5. Create introduced_in for first (earliest) timestamp
-                    if matching_ts:
-                        first_ts = min(matching_ts)
-                        kg.create_introduced_in_relationship(
-                            concept_name=concept_name_to_use,
-                            video_id=video_id,
-                            timestamp_seconds=first_ts
-                        )
-                        introduced_in_rels += 1
-
-            except Exception as e:
-                pass
-
-        typer_echo(f"Concepts deduped: {concepts_deduped}")
-        typer_echo(f"Concepts created: {concepts_created}")
-        typer_echo(f"Contains relationships: {contains_relationships}")
-        typer_echo(f"Appears_at relationships: {appears_at_rels}")
-        typer_echo(f"Introduced_in relationships: {introduced_in_rels}\n")
-
-        # Phase 6: Create co_occurs_with bidirectional relationships
-        typer_echo("Creating co-occurrence relationships...")
-        cooccurs_relationships = 0
-
-        for i, video in enumerate(new_videos, 1):
-            video_id = video["video_id"]
-
-            try:
-                concepts = load_concepts(video_id)
-                timestamps_data = load_timestamps(video_id)
-
-                if not concepts or not timestamps_data or len(concepts) < 2:
-                    continue
-
-                concept_timestamps = {}
-
-                for concept in concepts:
-                    deduped_results = deduplicator.deduplicate_concepts(
-                        [concept],
+                    # Create introduced_in for first (earliest) timestamp
+                    first_ts = min(matching_ts)
+                    kg.create_introduced_in_relationship(
+                        concept_name=concept_name_to_use,
                         video_id=video_id,
-                        similarity_threshold=0.85
+                        timestamp_seconds=first_ts
+                    )
+                    introduced_in_count += 1
+
+            # Now use the already-deduplicated concept_timestamps for co-occurrence
+            concept_names = list(concept_timestamps.keys())
+
+            for i in range(len(concept_names)):
+                for j in range(i + 1, len(concept_names)):
+                    concept1 = concept_names[i]
+                    concept2 = concept_names[j]
+
+                    ts1_list = concept_timestamps[concept1]
+                    ts2_list = concept_timestamps[concept2]
+
+                    score_1_to_2, score_2_to_1 = deduplicator.calculate_co_occurrence_scores(
+                        ts1_list,
+                        ts2_list,
+                        proximity_window=60
                     )
 
-                    concept_name = deduped_results[0][0]
-                    matching_ts = find_timestamps_for_concept(
-                        concept_name,
-                        timestamps_data
+                    kg.create_co_occurs_with_relationship(
+                        concept1_name=concept1,
+                        concept2_name=concept2,
+                        confidence_score_1_to_2=score_1_to_2,
+                        confidence_score_2_to_1=score_2_to_1
                     )
+                    cooccurs_count += 2
 
-                    if matching_ts:
-                        concept_timestamps[concept_name] = matching_ts
+        except Exception as e:
+            errors.append(f"Video {video_id}: {str(e)[:60]}")
 
-                concept_names = list(concept_timestamps.keys())
+    typer_echo(f"Concepts deduped: {concepts_deduped}")
+    typer_echo(f"Concepts created: {concepts_created}")
+    typer_echo(f"Contains relationships: {contains_count}")
+    typer_echo(f"Appears_at relationships: {appears_at_count}")
+    typer_echo(f"Introduced_in relationships: {introduced_in_count}")
+    typer_echo(f"Co-occurrence relationships: {cooccurs_count}\n")
 
-                for i in range(len(concept_names)):
-                    for j in range(i + 1, len(concept_names)):
-                        concept1 = concept_names[i]
-                        concept2 = concept_names[j]
+    return {
+        "success": (contains_count + appears_at_count + introduced_in_count) > 0 or len(new_videos) == 0,
+        "contains": contains_count,
+        "appears_at": appears_at_count,
+        "introduced_in": introduced_in_count,
+        "cooccurs": cooccurs_count,
+        "concepts_created": concepts_created,
+        "errors": errors
+    }
 
-                        ts1_list = concept_timestamps[concept1]
-                        ts2_list = concept_timestamps[concept2]
 
-                        score_1_to_2, score_2_to_1 = deduplicator.calculate_co_occurrence_scores(
-                            ts1_list,
-                            ts2_list,
-                            proximity_window=60
-                        )
+def _stage_generate_embeddings(new_videos, typer_echo=typer.echo) -> dict:
+    """
+    Stage 7: Generate embeddings for transcript chunks using Chroma.
 
-                        kg.create_co_occurs_with_relationship(
-                            concept1_name=concept1,
-                            concept2_name=concept2,
-                            confidence_score_1_to_2=score_1_to_2,
-                            confidence_score_2_to_1=score_2_to_1
-                        )
-                        cooccurs_relationships += 2
-
-            except Exception as e:
-                pass
-
-        typer_echo(f"Co-occurrence relationships: {cooccurs_relationships}\n")
-
-    # Generate embeddings for transcripts
+    PER-VIDEO: Log failures but continue sync.
+    Returns: {"success": bool, "embeddings_generated": int, "chunks_total": int, "errors": [...]}
+    """
     typer_echo("Generating embeddings...")
+
+    # Initialize EmbeddingGenerator (may fail if Chroma unavailable)
     try:
         embedding_generator = EmbeddingGenerator()
     except Exception as e:
         typer_echo(f"Embedding generation skipped: {str(e)}\n")
-        embedding_generator = None
+        return {
+            "success": False,
+            "embeddings_generated": 0,
+            "chunks_total": 0,
+            "errors": [str(e)]
+        }
 
+    extractor = TranscriptExtractor()
     embeddings_generated = 0
-    embeddings_failed = 0
+    chunks_total = 0
+    errors = []
 
-    if embedding_generator:
-        for i, video in enumerate(new_videos, 1):
-            video_id = video["video_id"]
+    for i, video in enumerate(new_videos, 1):
+        video_id = video["video_id"]
+        typer_echo(f"  [{i}/{len(new_videos)}] {video['title'][:50]}...", nl=False)
 
-            # Only generate embeddings if transcript was extracted
-            transcript = extractor.get_transcript(video_id)
-            if not transcript:
-                continue
+        # Load transcript (already extracted in Stage 3)
+        transcript = extractor.get_transcript(video_id)
+        if not transcript:
+            typer_echo(" ✗ (no transcript available)")
+            continue
 
-            typer_echo(f"  [{i}/{len(new_videos)}] {video['title'][:50]}...", nl=False)
+        try:
+            # Load timestamps for chunk-to-timestamp mapping
+            timestamps = load_timestamps(video_id)
 
-            try:
-                # Load timestamps for this video (for chunk-to-timestamp mapping)
-                timestamps = load_timestamps(video_id)
+            chunks_count = embedding_generator.embed_and_store(
+                video_id,
+                video["title"],
+                transcript,
+                timestamps=timestamps
+            )
+            embeddings_generated += 1
+            chunks_total += chunks_count
+            typer_echo(f" ✓ ({chunks_count} chunks)")
+        except Exception as e:
+            errors.append(f"Video {video_id}: {str(e)[:60]}")
+            typer_echo(f" ✗ ({str(e)[:30]})")
 
-                chunks_count = embedding_generator.embed_and_store(
-                    video_id,
-                    video["title"],
-                    transcript,
-                    timestamps=timestamps
-                )
-                embeddings_generated += 1
-                typer_echo(f" ✓ ({chunks_count} chunks)")
-            except Exception as e:
-                embeddings_failed += 1
-                typer_echo(f" ✗ ({str(e)})")
+    typer_echo(f"\nEmbeddings generated: {embeddings_generated}/{len(new_videos)}, total chunks: {chunks_total}\n")
 
-        typer_echo(f"\nEmbeddings generated: {embeddings_generated}/{len(new_videos)}\n")
+    return {
+        "success": embeddings_generated > 0,
+        "embeddings_generated": embeddings_generated,
+        "chunks_total": chunks_total,
+        "errors": errors
+    }
 
-    # Update sync state
+
+def _stage_update_sync_state(new_video_ids, stats_summary, typer_echo=typer.echo) -> dict:
+    """
+    Stage 8: Persist sync state to disk.
+
+    CRITICAL: If this fails, sync work is not recorded and will be re-done on next sync.
+    If this fails, abort with clear remediation message.
+
+    Args:
+        new_video_ids: List of video IDs successfully processed
+        stats_summary: Dict with sync statistics (transcripts_failed, etc.)
+
+    Returns: {"success": bool, "videos_persisted": int, "errors": [...]}
+    """
     typer_echo("Updating sync state...")
-    new_video_ids = [v["video_id"] for v in new_videos]
+
     try:
-        update_sync_state(new_video_ids, failed_count=transcripts_failed)
+        # Calculate failed count (transcripts that failed to extract)
+        failed_count = stats_summary.get("transcripts_failed", 0)
+
+        # Persist sync state
+        update_sync_state(new_video_ids, failed_count=failed_count)
         typer_echo(f"Saved {len(new_video_ids)} new videos\n")
+
+        return {
+            "success": True,
+            "videos_persisted": len(new_video_ids),
+            "errors": []
+        }
+
     except Exception as e:
-        typer_echo(f"Error saving sync state: {str(e)}")
+        typer_echo(f"\n✗ CRITICAL ERROR: Failed to update sync state")
+        typer_echo(f"   {str(e)}\n")
+        typer_echo("REMEDIATION:")
+        typer_echo("   - Check disk space in ~/.yt-rag/")
+        typer_echo("   - Verify sync_state.json is writable")
+        typer_echo("   - Check file permissions: ls -la ~/.yt-rag/sync_state.json\n")
+        typer_echo("⚠️  WARNING: Sync work was completed but NOT persisted.")
+        typer_echo("   Videos will be re-processed on next sync.\n")
+
+        return {
+            "success": False,
+            "videos_persisted": 0,
+            "errors": [str(e)]
+        }
+
+
+def _process_videos(videos: list, typer_echo=typer.echo) -> None:
+    """
+    Orchestrate full sync pipeline (Stages 1-8) with proper error handling.
+
+    CRITICAL stages (1, 8): abort on failure with remediation message
+    PER-VIDEO stages (2-7): continue on individual failures, accumulate stats
+    """
+    if not videos:
+        typer_echo("No videos to process!")
         return
 
-    # Cleanup Neo4j connection
+    # Filter new videos
+    sync_state = load_sync_state()
+    already_indexed = set(sync_state.get("indexed_video_ids", []))
+    new_videos = [v for v in videos if v["video_id"] not in already_indexed]
+
+    if not new_videos:
+        typer_echo("Nothing new to process!")
+        return
+
+    typer_echo(f"New videos to process: {len(new_videos)}")
+    typer_echo(f"Skipping: {len(videos) - len(new_videos)} already indexed\n")
+
+    # Accumulate stats across all stages
+    all_stats = {
+        "videos_processed": len(new_videos),
+        "videos_indexed": 0,
+        "transcripts_extracted": 0,
+        "transcripts_failed": 0,
+        "concepts_extracted": 0,
+        "concepts_created": 0,
+        "embeddings_generated": 0,
+        "chunks_total": 0,
+        "neo4j_contains": 0,
+        "neo4j_appears_at": 0,
+        "neo4j_introduced_in": 0,
+        "neo4j_cooccurs": 0,
+        "all_errors": [],
+        "critical_error": None,
+    }
+
+    # STAGE 1: Init Neo4j (CRITICAL)
+    kg_driver, kg, deduplicator = _stage_init_neo4j(typer_echo)
+
+    if not kg:
+        all_stats["critical_error"] = "Neo4j initialization failed"
+        _print_final_status(all_stats, typer_echo)
+        return
+
+    # STAGES 2-7: Run in sequence, accumulate results
+    result2 = _stage_create_neo4j_nodes(kg, new_videos, typer_echo)
+    all_stats["all_errors"].extend(result2["errors"])
+
+    result3 = _stage_extract_transcripts(new_videos, typer_echo)
+    all_stats["transcripts_extracted"] = result3["transcripts_extracted"]
+    all_stats["transcripts_failed"] = len(new_videos) - result3["transcripts_extracted"]
+    all_stats["all_errors"].extend(result3["errors"])
+
+    result4 = _stage_create_timestamp_nodes(kg, new_videos, typer_echo)
+    all_stats["all_errors"].extend(result4["errors"])
+
+    result5 = _stage_extract_concepts(new_videos, typer_echo)
+    all_stats["concepts_extracted"] = result5["concepts_extracted"]
+    all_stats["all_errors"].extend(result5["errors"])
+
+    result6 = _stage_build_knowledge_graph(kg, deduplicator, new_videos, typer_echo)
+    all_stats["concepts_created"] = result6["concepts_created"]
+    all_stats["neo4j_contains"] = result6["contains"]
+    all_stats["neo4j_appears_at"] = result6["appears_at"]
+    all_stats["neo4j_introduced_in"] = result6["introduced_in"]
+    all_stats["neo4j_cooccurs"] = result6["cooccurs"]
+    all_stats["all_errors"].extend(result6["errors"])
+
+    result7 = _stage_generate_embeddings(new_videos, typer_echo)
+    all_stats["embeddings_generated"] = result7["embeddings_generated"]
+    all_stats["chunks_total"] = result7["chunks_total"]
+    all_stats["all_errors"].extend(result7["errors"])
+
+    # STAGE 8: Update sync state (CRITICAL)
+    new_video_ids = [v["video_id"] for v in new_videos]
+    result8 = _stage_update_sync_state(new_video_ids, all_stats, typer_echo)
+    all_stats["videos_indexed"] = result8["videos_persisted"]
+
+    if not result8["success"]:
+        all_stats["critical_error"] = "Failed to persist sync state"
+        all_stats["all_errors"].extend(result8["errors"])
+
+    # Cleanup
     if kg_driver:
         kg_driver.close()
 
-    # Show summary
-    typer_echo("Processing complete!")
-    typer_echo(f"Transcripts extracted: {transcripts_extracted}")
-    typer_echo(f"Transcripts failed: {transcripts_failed}")
-    if concept_extractor:
-        typer_echo(f"Concepts extracted: {concepts_extracted}")
-        typer_echo(f"Concepts failed: {concepts_failed}")
-    if embedding_generator:
-        typer_echo(f"Embeddings generated: {embeddings_generated}")
-        typer_echo(f"Embeddings failed: {embeddings_failed}")
+    # Print comprehensive final status
+    _print_final_status(all_stats, typer_echo)
+
+
+def _print_final_status(stats, typer_echo=typer.echo) -> None:
+    """
+    Print comprehensive final status report for sync operation.
+
+    Combines results from all 8 stages per Issue #11 requirements:
+    "Final status shows: videos indexed, concepts extracted, failed count"
+    """
+    typer_echo("=" * 80)
+    typer_echo("SYNC PIPELINE COMPLETE")
+    typer_echo("=" * 80)
+
+    if stats["critical_error"]:
+        typer_echo(f"\n✗ CRITICAL ERROR: {stats['critical_error']}")
+        typer_echo("   See remediation messages above.\n")
+        return
+
+    typer_echo("\nProcessing Summary:")
+    typer_echo(f"  Videos processed: {stats['videos_processed']}")
+    typer_echo(f"  Videos indexed: {stats['videos_indexed']}")
+    typer_echo(f"  Transcripts extracted: {stats['transcripts_extracted']}/{stats['videos_processed']}")
+    if stats['transcripts_failed'] > 0:
+        typer_echo(f"  Transcripts failed: {stats['transcripts_failed']}")
+
+    typer_echo(f"\nConcepts:")
+    typer_echo(f"  Extracted: {stats['concepts_extracted']}")
+    typer_echo(f"  Created (new): {stats['concepts_created']}")
+
+    typer_echo(f"\nKnowledge Graph Relationships:")
+    typer_echo(f"  Contains: {stats['neo4j_contains']}")
+    typer_echo(f"  Appears_at: {stats['neo4j_appears_at']}")
+    typer_echo(f"  Introduced_in: {stats['neo4j_introduced_in']}")
+    typer_echo(f"  Co-occurs: {stats['neo4j_cooccurs']}")
+
+    typer_echo(f"\nEmbeddings:")
+    typer_echo(f"  Videos with embeddings: {stats['embeddings_generated']}")
+    typer_echo(f"  Total chunks: {stats['chunks_total']}")
+
+    if stats["all_errors"]:
+        typer_echo(f"\nPer-video failures ({len(stats['all_errors'])}):")
+        for error in stats["all_errors"][:5]:
+            typer_echo(f"  - {error}")
+        if len(stats["all_errors"]) > 5:
+            typer_echo(f"  ... and {len(stats['all_errors']) - 5} more")
+
+    typer_echo("\n✓ SYNC COMPLETE")
+    typer_echo("=" * 80)
 
 
 @app.command()
