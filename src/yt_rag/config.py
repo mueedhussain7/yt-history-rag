@@ -58,6 +58,103 @@ def save_config(config: Dict[str, Any]) -> None:
         yaml.dump(config, f, default_flow_style=False, sort_keys=False)
 
 
+def get_config_value(key_path: str) -> Any:
+    """
+    Get a config value using dot notation (e.g., 'youtube.client_id').
+
+    Args:
+        key_path: Dot-separated path to config key
+
+    Returns:
+        The config value
+
+    Raises:
+        KeyError: If key path does not exist
+    """
+    config = load_config()
+    keys = key_path.split('.')
+    value = config
+
+    for key in keys:
+        if isinstance(value, dict) and key in value:
+            value = value[key]
+        else:
+            valid_paths = _get_valid_paths(load_config())
+            raise KeyError(
+                f"Config key '{key_path}' not found.\n"
+                f"Valid keys: {', '.join(sorted(valid_paths))}"
+            )
+    return value
+
+
+def set_config_value(key_path: str, value: str) -> None:
+    """
+    Set a config value using dot notation (e.g., 'youtube.client_id').
+    Performs type coercion based on existing value type.
+
+    Args:
+        key_path: Dot-separated path to config key
+        value: String value to set
+
+    Raises:
+        KeyError: If key path does not exist
+        ValueError: If type coercion fails
+    """
+    config = load_config()
+    keys = key_path.split('.')
+    current = config
+
+    # Navigate to parent of final key
+    for key in keys[:-1]:
+        if isinstance(current, dict) and key in current:
+            current = current[key]
+        else:
+            raise KeyError(f"Config path '{key_path}' does not exist")
+
+    # Get final key and existing value
+    final_key = keys[-1]
+    if not isinstance(current, dict) or final_key not in current:
+        raise KeyError(f"Config key '{key_path}' does not exist")
+
+    existing_value = current[final_key]
+
+    # Type coercion based on existing value type
+    if isinstance(existing_value, bool):
+        if value.lower() in ('true', '1', 'yes'):
+            current[final_key] = True
+        elif value.lower() in ('false', '0', 'no'):
+            current[final_key] = False
+        else:
+            raise ValueError(f"Expected boolean for '{key_path}', got '{value}'")
+    elif isinstance(existing_value, int):
+        try:
+            current[final_key] = int(value)
+        except ValueError:
+            raise ValueError(f"Expected integer for '{key_path}', got '{value}'")
+    elif isinstance(existing_value, float):
+        try:
+            current[final_key] = float(value)
+        except ValueError:
+            raise ValueError(f"Expected numeric value for '{key_path}', got '{value}'")
+    else:
+        # String or None
+        current[final_key] = value
+
+    save_config(config)
+
+
+def _get_valid_paths(config: Dict[str, Any], prefix: str = "") -> list:
+    """Helper to list all valid config paths for error messages."""
+    paths = []
+    for key, value in config.items():
+        full_key = f"{prefix}.{key}" if prefix else key
+        if isinstance(value, dict):
+            paths.extend(_get_valid_paths(value, full_key))
+        else:
+            paths.append(full_key)
+    return paths
+
+
 def get_sync_state_path() -> Path:
     """Get path to sync state file."""
     return get_config_dir() / "sync_state.json"
