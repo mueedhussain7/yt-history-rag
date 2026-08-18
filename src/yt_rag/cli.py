@@ -37,6 +37,77 @@ load_dotenv()
 
 app = typer.Typer(help="YouTube History RAG - Search your YouTube watch history")
 
+# Config sub-app for configuration management
+config_app = typer.Typer(help="Manage configuration.")
+
+
+@config_app.command()
+def get(key: str = typer.Argument(..., help="Config key (e.g., youtube.client_id)")):
+    """Get a configuration value."""
+    try:
+        from .config import get_config_value
+        value = get_config_value(key)
+        if value is None:
+            typer.echo("(not set)")
+        else:
+            typer.echo(str(value))
+    except KeyError as e:
+        typer.echo(f"❌ Error: {e}", err=True)
+        raise typer.Exit(1)
+
+
+@config_app.command()
+def set(
+    key: str = typer.Argument(..., help="Config key (e.g., youtube.client_id)"),
+    value: str = typer.Argument(..., help="Value to set")
+):
+    """Set a configuration value."""
+    try:
+        from .config import set_config_value
+        set_config_value(key, value)
+        typer.echo(f"✓ Set {key} = {value}")
+    except (KeyError, ValueError) as e:
+        typer.echo(f"❌ Error: {e}", err=True)
+        raise typer.Exit(1)
+
+
+app.add_typer(config_app, name="config")
+
+
+@app.command()
+def status():
+    """Show sync status and statistics."""
+    from .config import load_sync_state
+    from datetime import datetime
+
+    sync_state = load_sync_state()
+    last_sync = sync_state.get("last_sync_time")
+    stats = sync_state.get("sync_stats", {})
+
+    typer.echo("\n" + "="*60)
+    typer.echo("SYNC STATUS")
+    typer.echo("="*60)
+
+    # Format last sync time
+    if last_sync:
+        try:
+            dt = datetime.fromisoformat(last_sync)
+            formatted = dt.strftime("%Y-%m-%d %H:%M:%S")
+            typer.echo(f"Last sync:       {formatted}")
+        except (ValueError, TypeError):
+            typer.echo(f"Last sync:       {last_sync}")
+    else:
+        typer.echo("Last sync:       Never")
+
+    # Display stats
+    indexed = stats.get("total_indexed", 0)
+    failed = stats.get("total_failed", 0)
+
+    typer.echo(f"Videos indexed:  {indexed}")
+    typer.echo(f"Videos failed:   {failed}")
+
+    typer.echo("="*60 + "\n")
+
 
 def _stage_init_neo4j(typer_echo=typer.echo) -> tuple:
     """
